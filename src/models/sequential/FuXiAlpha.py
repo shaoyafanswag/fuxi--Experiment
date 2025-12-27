@@ -11,7 +11,6 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x):
-        # 优化：强制转float32计算，防止FP16溢出
         dtype = x.dtype
         x = x.float()
         norm_x = x.pow(2).mean(-1, keepdim=True)
@@ -37,7 +36,7 @@ class FuXiAlpha(SequentialModel):
         self.i_embeddings = nn.Embedding(self.item_num, self.emb_size)
         self.p_embeddings = nn.Embedding(self.max_len + 1, self.emb_size)
         
-        # 优化：真正的相对位置编码表 (Range: -L ~ +L)
+        # 相对位置编码表
         self.relative_bias_table = nn.Embedding(2 * self.max_len + 1, self.num_heads)
         nn.init.trunc_normal_(self.relative_bias_table.weight, std=0.02)
 
@@ -63,13 +62,13 @@ class FuXiAlpha(SequentialModel):
         lengths = feed_dict['lengths'].long() 
         batch_size, seq_len = item_seq.shape
         
-        # 优化：Expand代替Repeat节省显存
+        # Expand代替Repeat节省显存
         pos = torch.arange(seq_len, device=self.device).unsqueeze(0).expand(batch_size, -1)
         
         x = self.i_embeddings(item_seq) + self.p_embeddings(pos)
         x = self.dropout(x)
 
-        # 优化：计算相对位置矩阵 (i-j) 并查表
+        # 计算相对位置矩阵(i-j)并查表
         range_vec = torch.arange(seq_len, device=self.device)
         # Broadcasting计算差值: [L, L]
         relative_idx = range_vec[None, :] - range_vec[:, None] 
@@ -79,7 +78,7 @@ class FuXiAlpha(SequentialModel):
         # 获取Bias并调整维度: [L, L, H] -> [1, H, L, L]
         rel_bias = self.relative_bias_table(relative_idx).permute(2, 0, 1).unsqueeze(0)
 
-        # 优化：使用 -1e9 代替 -inf，防止SiLU产生NaN
+        # 使用 -1e9 代替 -inf，防止SiLU产生NaN
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device) * -1e9, diagonal=1)
 
         for block in self.fuxi_blocks:
@@ -120,9 +119,9 @@ class AMSLayer(nn.Module):
         self.d_h = d_model // n_heads
         self.scale = self.d_h ** -0.5
         
-        # 优化：合并QKV投影，加速矩阵运算
+        # 合并QKV投影，加速矩阵运算
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
-        self.w_u = nn.Linear(d_model, d_model, bias=False) # Gating u
+        self.w_u = nn.Linear(d_model, d_model, bias=False)
         
         self.rms_norm = RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
@@ -142,14 +141,14 @@ class AMSLayer(nn.Module):
         # 语义注意力分数
         attn_score = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         
-        # 优化：直接注入相对位置Bias (Unified Bias)
+        # 直接注入相对位置Bias (Unified Bias)
         if p_bias is not None:
             attn_score = attn_score + p_bias
 
         if mask is not None:
             attn_score = attn_score + mask.unsqueeze(0).unsqueeze(0)
             
-        # 论文核心：使用SiLU替代Softmax
+        # 使用SiLU替代Softmax
         attn_prob = F.silu(attn_score)
         attn_prob = self.dropout(attn_prob)
         
